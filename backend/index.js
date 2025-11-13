@@ -278,34 +278,93 @@ app.use(express.json());
    PART 1: BASE64 FONT EMBEDDER (guaranteed)
 --------------------------------------------*/
 
+// Replace your embedFontBase64() with this improved version
 function embedFontBase64() {
-  const fontPath = path.join(
-    __dirname,
-    "public",
-    "fonts",
-    "NotoSansDevanagari-Regular.ttf"
-  );
+  // candidate search order (try backend/public first, then other common paths)
+  const candidates = [
+    path.join(__dirname, "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
+    path.join(__dirname, "..", "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
+    path.join(__dirname, "..", "frontend", "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
+    path.join(__dirname, "..", "..", "frontend", "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
+  ];
 
-  console.log(">>> Checking font at:", fontPath);
+  let fontPath = null;
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) {
+        fontPath = c;
+        break;
+      }
+    } catch {}
+  }
 
-  if (!fs.existsSync(fontPath)) {
-    console.error(">>> ERROR: Font file NOT FOUND at:", fontPath);
+  if (!fontPath) {
+    console.error(">>> ERROR: Could not find font file in candidates:", candidates);
     return "";
   }
 
-  const buffer = fs.readFileSync(fontPath);
+  console.log(">>> Using font file:", fontPath);
+
+  let buffer;
+  try {
+    buffer = fs.readFileSync(fontPath);
+  } catch (err) {
+    console.error(">>> ERROR reading font file:", err?.message || err);
+    return "";
+  }
+
+  const size = buffer.length;
+  console.log(">>> Font file size (bytes):", size);
+
+  // Inspect first 4 bytes to guess format:
+  // TTF: 00 01 00 00
+  // OTF: 'OTTO'
+  // WOFF: 'wOFF'
+  // WOFF2: 'wOF2'
+  const first4 = buffer.slice(0, 4).toString("ascii");
+  const first4hex = buffer.slice(0, 4).toString("hex");
+  console.log(">>> Font header (ascii):", first4, " (hex):", first4hex);
+
+  let format = "truetype"; // default
+
+  if (first4 === "OTTO") {
+    format = "opentype"; // OTF
+  } else if (first4 === "wOFF") {
+    format = "woff";
+  } else if (first4 === "wOF2") {
+    format = "woff2";
+  } else if (first4hex === "00010000") {
+    format = "truetype"; // TTF
+  } else {
+    console.warn(">>> Unknown font header — falling back to truetype");
+  }
+
+  // If font is huge, embedding will be large; still OK but log it
+  if (size < 2000) {
+    console.warn(">>> WARNING: Font looks very small (<2KB) — likely corrupted or wrong file.");
+  }
+
   const base64 = buffer.toString("base64");
 
-  console.log(">>> Font loaded successfully. Size:", buffer.length, "bytes");
+  // Choose MIME and format string
+  let mime = "font/ttf";
+  if (format === "opentype") mime = "font/otf";
+  if (format === "woff") mime = "font/woff";
+  if (format === "woff2") mime = "font/woff2";
 
-  return `
+  // Build @font-face using the correct format() token
+  const css = `
     @font-face {
       font-family: "NotoDevaEmbed";
-      src: url("data:font/ttf;base64,${base64}") format("truetype");
+      src: url("data:${mime};base64,${base64}") format("${format}");
       font-weight: normal;
       font-style: normal;
+      font-display: swap;
     }
   `;
+
+  console.log(`>>> Embedded font using format="${format}", mime="${mime}"`);
+  return css;
 }
 
 /* -------------------------------------------
