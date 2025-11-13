@@ -276,7 +276,6 @@ app.post("/generate-pdf", async (req, res) => {
   try {
     const fontPath = path.join(
       __dirname,
-      "..",
       "public",
       "fonts",
       "NotoSansDevanagari-Regular.ttf"
