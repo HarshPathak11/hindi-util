@@ -118,6 +118,7 @@ import puppeteer from "puppeteer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
@@ -125,23 +126,20 @@ const __dirname = path.dirname(__filename);
 app.use(cors());
 app.use(express.json());
 
-/**
- * Diagnostic: list cache dir contents (helps debug Render installs)
- */
-function listPuppeteerCache() {
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer";
-  console.log(">>> PUPPETEER_CACHE_DIR:", cacheDir);
+/* ---------- Diagnostics helpers ---------- */
+
+function listPuppeteerCache(cacheDir) {
+  console.log(">>> listPuppeteerCache: checking", cacheDir);
   try {
     const entries = fs.readdirSync(cacheDir, { withFileTypes: true });
-    console.log(">>> puppeteer cache dir entries:", entries.map((e) => e.name));
+    console.log(">>> puppeteer cache entries:", entries.map((e) => e.name));
     for (const e of entries) {
       if (e.isDirectory()) {
         const sub = path.join(cacheDir, e.name);
         try {
-          const subEntries = fs.readdirSync(sub);
-          console.log(`>>> contents of ${sub}:`, subEntries);
-        } catch (err) {
-          console.warn(">>> could not list subdir", sub, err?.message || err);
+          console.log(`>>> contents of ${sub}:`, fs.readdirSync(sub));
+        } catch (er) {
+          console.warn(">>> could not list subdir", sub, er?.message || er);
         }
       }
     }
@@ -150,54 +148,113 @@ function listPuppeteerCache() {
   }
 }
 
+/* ---------- Ensure Chrome is installed at runtime ---------- */
+
 /**
- * Robust puppeteer launcher:
- * - prefers PUPPETEER_EXECUTABLE_PATH env
- * - falls back to puppeteer.executablePath() if available
- * - checks paths exist and logs diagnostics
+ * Try to determine if chrome binary exists at the given path
  */
-async function launchBrowser() {
-  const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+function pathExists(p) {
+  try {
+    return !!p && fs.existsSync(p);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run puppeteer runtime install if needed.
+ * This may take 10-30s on first cold start.
+ */
+async function ensureChromeInstalled() {
+  // Prefer explicitly configured executable path (from Render env var)
+  const envExecPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (envExecPath && pathExists(envExecPath)) {
+    console.log(">>> Found chrome via PUPPETEER_EXECUTABLE_PATH:", envExecPath);
+    return envExecPath;
+  }
+
+  // Try puppeteer.executablePath() (may throw if not installed)
   let autoPath;
   try {
     autoPath = puppeteer.executablePath();
   } catch (err) {
     autoPath = undefined;
   }
-
-  console.log(">>> PUPPETEER_EXECUTABLE_PATH (env):", envPath);
-  console.log(">>> puppeteer.executablePath():", autoPath);
-
-  const candidates = [envPath, autoPath].filter(Boolean);
-
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) {
-        console.log(">>> Chrome binary exists at:", p);
-        return await puppeteer.launch({
-          headless: "new",
-          executablePath: p,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-zygote",
-            "--single-process",
-          ],
-        });
-      } else {
-        console.warn(">>> Candidate path does not exist:", p);
-      }
-    } catch (err) {
-      console.warn(">>> Error checking candidate path:", p, err?.message || err);
-    }
+  if (autoPath && pathExists(autoPath)) {
+    console.log(">>> Found chrome via puppeteer.executablePath():", autoPath);
+    return autoPath;
   }
 
-  // Final fallback: try default launch (may still fail)
-  console.warn(">>> No valid chrome binary found in candidates, trying default puppeteer.launch()");
-  return await puppeteer.launch({
+  // If not found, perform runtime install.
+  // Use a cache dir inside /tmp to ensure it's writable and runtime-local.
+  const runtimeCache = process.env.PUPPETEER_CACHE_DIR || "/tmp/puppeteer";
+  console.log(">>> Chrome not found at candidates. Will attempt runtime install.");
+  console.log(">>> Using runtime cache dir:", runtimeCache);
+
+  // Make sure cache dir exists
+  try {
+    fs.mkdirSync(runtimeCache, { recursive: true });
+  } catch (err) {
+    console.warn(">>> could not create runtime cache dir:", err?.message || err);
+  }
+
+  // Run the install command (synchronous to keep startup simple)
+  // NOTE: use a specific puppeteer version if you want, otherwise latest installed is used.
+  const installCmd = "npx puppeteer browsers install chrome --silent";
+  console.log(">>> Running install command:", installCmd);
+  try {
+    execSync(installCmd, {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        PUPPETEER_CACHE_DIR: runtimeCache,
+      },
+      // optionally increase timeout with execSync? rely on default for now
+    });
+    console.log(">>> puppeteer install command finished.");
+  } catch (err) {
+    console.error(">>> puppeteer runtime install failed:", err?.message || err);
+    throw new Error("Runtime puppeteer install failed: " + (err?.message || err));
+  }
+
+  // Re-evaluate executable path after install
+  try {
+    const newPath = puppeteer.executablePath();
+    if (newPath && pathExists(newPath)) {
+      console.log(">>> Chrome found after runtime install at:", newPath);
+      return newPath;
+    } else {
+      console.warn(">>> puppeteer.executablePath() returned:", newPath);
+      // Also try common location inside the runtime cache
+      // Find latest chrome dir under runtimeCache
+      try {
+        const chromeDir = fs.readdirSync(runtimeCache).find((d) => d.startsWith("chrome"));
+        if (chromeDir) {
+          const candidate = path.join(runtimeCache, chromeDir);
+          console.log(">>> Found candidate chrome dir:", candidate);
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.warn(">>> Error calling puppeteer.executablePath() after install:", err?.message || err);
+  }
+
+  throw new Error("Chrome binary not found after runtime install.");
+}
+
+/* ---------- Robust browser launcher that uses ensureChromeInstalled ---------- */
+
+async function launchBrowser() {
+  // Try to ensure chrome is installed and get path
+  const cacheDirToLog = process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer";
+  listPuppeteerCache(cacheDirToLog);
+
+  const execPath = await ensureChromeInstalled();
+  console.log(">>> Launching puppeteer with executablePath:", execPath);
+
+  const browser = await puppeteer.launch({
     headless: "new",
+    executablePath: execPath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -207,7 +264,11 @@ async function launchBrowser() {
       "--single-process",
     ],
   });
+
+  return browser;
 }
+
+/* ---------- Express route ---------- */
 
 app.post("/generate-pdf", async (req, res) => {
   const { headerText, bodyText, footerText } = req.body;
@@ -223,21 +284,12 @@ app.post("/generate-pdf", async (req, res) => {
 
     const html = buildHTML(headerText, bodyText, footerText, fontPath);
 
-    // Diagnostics: show cache contents so we can see the installed chrome
-    listPuppeteerCache();
-
-    // Launch browser using robust helper
+    // Attempt to launch browser (will install if needed)
     const browser = await launchBrowser();
-
-    // If launchBrowser returned undefined or null (shouldn't), throw
-    if (!browser) {
-      throw new Error("Failed to launch browser (no browser instance returned).");
-    }
 
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "networkidle0" });
 
-    // Puppeteer returns a Uint8Array; convert to Buffer for safe sending
     const rawPdf = await page.pdf({
       format: "A4",
       printBackground: true,
@@ -250,7 +302,6 @@ app.post("/generate-pdf", async (req, res) => {
     res.send(pdfBuffer);
   } catch (error) {
     console.error("PDF generation error:", error?.message || error);
-    // include stack in logs for debugging, but send generic error to client
     console.error(error?.stack || "");
     res.status(500).json({ error: "PDF generation failed" });
   }
@@ -319,6 +370,6 @@ function buildHTML(header, body, footer, fontPath) {
   `;
 }
 
-// Use dynamic PORT for Render / cloud providers
+// listen on dynamic port
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => console.log(`PDF server running on ${PORT}`));
