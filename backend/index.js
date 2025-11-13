@@ -282,7 +282,7 @@ app.use(express.json());
 function embedFontBase64() {
   // candidate search order (try backend/public first, then other common paths)
   const candidates = [
-    path.join(__dirname, "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
+    path.join(__dirname, "public", "fonts","Noto_Sans_Devanagari","NotoSansDevanagari-VariableFont_wdth,wght.ttf"),
     path.join(__dirname, "..", "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
     path.join(__dirname, "..", "frontend", "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
     path.join(__dirname, "..", "..", "frontend", "public", "fonts", "NotoSansDevanagari-Regular.ttf"),
