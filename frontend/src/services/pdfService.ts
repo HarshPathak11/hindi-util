@@ -74,7 +74,7 @@ export async function generatePDF({
   bodyText,
   footerText,
 }: PDFOptions): Promise<Blob> {
-  const response = await fetch("https://hindi-util.onrender.com/generate-pdf", {
+  const response = await fetch("http://localhost:5001/generate-pdf", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
