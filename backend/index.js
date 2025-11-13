@@ -460,8 +460,10 @@ app.post("/generate-pdf", async (req, res) => {
 
     const browser = await launchBrowser();
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(120000);
+    page.setDefaultTimeout(120000);
 
-    await page.setContent(html, { waitUntil: "networkidle0" });
+    await page.setContent(html, { waitUntil: ['domcontentloaded', 'load'], timeout: 120000 });
 
     const pdfRaw = await page.pdf({
       format: "A4",
